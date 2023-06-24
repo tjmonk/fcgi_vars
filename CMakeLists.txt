@@ -7,7 +7,6 @@ project(fcgi_vars
     DESCRIPTION "Fast CGI Variable Server query module"
 )
 
-find_library( LIB_VARSERVER varserver REQUIRED )
 find_library( LIB_FCGI fcgi REQUIRED )
 
 add_executable( ${PROJECT_NAME}
@@ -19,7 +18,7 @@ target_include_directories( ${PROJECT_NAME}
 )
 
 target_link_libraries( ${PROJECT_NAME}
-	${LIB_VARSERVER}
+	varserver
     ${LIB_FCGI}
 )
 
