@@ -1574,7 +1574,7 @@ static int OutputVar( VAR_HANDLE hVar, void *arg )
                            fd ) == EOK )
             {
                 /* NUL terminate */
-                write( fd, "\0", 1 );
+                (void)write( fd, "\0", 1 );
 
                 /* get a handle to the output buffer */
                 pData = VARFP_GetData( pState->pVarFP );
