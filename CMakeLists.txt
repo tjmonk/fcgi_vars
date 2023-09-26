@@ -17,6 +17,14 @@ target_include_directories( ${PROJECT_NAME}
 	PRIVATE inc
 )
 
+target_compile_options( ${PROJECT_NAME}
+	PUBLIC
+	-Wall
+	-Wextra
+	-Wpedantic
+	-Werror
+)
+
 target_link_libraries( ${PROJECT_NAME}
 	varserver
     ${LIB_FCGI}

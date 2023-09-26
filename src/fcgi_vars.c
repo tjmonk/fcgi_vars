@@ -106,6 +106,12 @@ typedef struct _FCGIVarsState
     /*! verbose flag */
     bool verbose;
 
+    /*! read only flag */
+    bool readonly;
+
+    /*! variable flags */
+    VarFlags flags;
+
 } FCGIVarsState;
 
 
@@ -137,7 +143,7 @@ typedef struct _fcgi_handler
         Private function declarations
 ==============================================================================*/
 
-void main(int argc, char **argv);
+int main(int argc, char **argv);
 static int InitState( FCGIVarsState *pState );
 static int ProcessOptions( int argC, char *argV[], FCGIVarsState *pState );
 static void usage( char *cmdname );
@@ -165,8 +171,11 @@ static int ProcessNameQuery( FCGIVarsState *pState, char *query );
 static int ProcessSetRequest( FCGIVarsState *pState, char *query );
 static int ProcessSetTuple( FCGIVarsState *pState, char *pTuple );
 static int ProcessMatchQuery( FCGIVarsState *pState, char *query );
+static int ProcessInstanceQuery( FCGIVarsState *pState, char *query );
 static int ProcessSelectCache( FCGIVarsState *pState, char *name );
 static int ProcessSelectClearCache( FCGIVarsState *pState, char *name );
+
+static VAR_HANDLE CheckFlags( FCGIVarsState *pState, VAR_HANDLE hVar );
 
 static int AllocatePOSTBuffer( FCGIVarsState *pState );
 static int ClearPOSTBuffer( FCGIVarsState *pState );
@@ -179,7 +188,7 @@ static HandlerFunction GetHandlerFunction( char *method,
                                            FCGIHandler *pFCGIHandlers,
                                            size_t numHandlers );
 
-static int OutputJSONVar( char prefix, char *name, char *value );
+static int OutputJSONVar( char prefix, VarInfo *info, char *value );
 static void SendVarsHeader( void );
 static void SendVarsFooter( int count );
 static int ErrorResponse( int status,  char *description );
@@ -228,7 +237,7 @@ FCGIVarsState state;
     @return none
 
 ==============================================================================*/
-void main(int argc, char **argv)
+int main(int argc, char **argv)
 {
     /* initialize the FCGI Vars state */
     InitState( &state );
@@ -267,6 +276,8 @@ void main(int argc, char **argv)
     }
 
     VARFP_Close( state.pVarFP );
+
+    return 0;
 }
 
 /*============================================================================*/
@@ -325,6 +336,8 @@ static void usage( char *cmdname )
                 "usage: %s [-v] [-h] "
                 " [-h] : display this help"
                 " [-v] : verbose output"
+                " [-r] : readonly"
+                " [-f <flag list>] : comma separated flag list"
                 " [-l <max POST length>] : maximum POST data length",
                 cmdname );
     }
@@ -360,7 +373,7 @@ static int ProcessOptions( int argC, char *argV[], FCGIVarsState *pState )
 {
     int c;
     int result = EINVAL;
-    const char *options = "hvl:";
+    const char *options = "hvl:rf:";
 
     if( ( pState != NULL ) &&
         ( argV != NULL ) )
@@ -377,6 +390,14 @@ static int ProcessOptions( int argC, char *argV[], FCGIVarsState *pState )
 
                 case 'l':
                     pState->maxPostLength = strtoul( optarg, NULL, 0 );
+                    break;
+
+                case 'r':
+                    pState->readonly = true;
+                    break;
+
+                case 'f':
+                    VARSERVER_StrToFlags(optarg, &pState->flags);
                     break;
 
                 case 'h':
@@ -772,8 +793,6 @@ static int ProcessUnsupportedRequest( FCGIVarsState *pState )
 static int ProcessQuery( FCGIVarsState *pState, char *query )
 {
     int result = EINVAL;
-    char *pQuery = NULL;
-    int i;
     int n1;
     int n2;
 
@@ -787,6 +806,7 @@ static int ProcessQuery( FCGIVarsState *pState, char *query )
     {
         { "name=", &ProcessNameQuery },
         { "match=", &ProcessMatchQuery },
+        { "instance=", &ProcessInstanceQuery },
         { "set=", &ProcessSetRequest }
     };
 
@@ -858,7 +878,6 @@ static int ProcessQueryFunctions( FCGIVarsState *pState,
 {
     int result = EINVAL;
     char *mutquery;
-    int i;
     char *pQuery;
     char *save = NULL;
     int rc;
@@ -937,7 +956,6 @@ static int InvokeQueryFunction( FCGIVarsState *pState,
     int i;
     char *tag;
     int (*pTagFn)( FCGIVarsState *, char *) = NULL;
-    bool found;
     size_t offset;
 
     if ( ( pState != NULL ) && ( query != NULL ) && ( pFns != NULL ) )
@@ -1013,6 +1031,7 @@ static int ProcessNameQuery( FCGIVarsState *pState, char *query )
         {
             /* look up the variable using its name */
             hVar = VAR_FindByName( pState->hVarServer, pName );
+            hVar = CheckFlags( pState, hVar );
             if( hVar != VAR_INVALID )
             {
                 /* add the variable to the variable cache */
@@ -1037,6 +1056,61 @@ static int ProcessNameQuery( FCGIVarsState *pState, char *query )
 }
 
 /*============================================================================*/
+/*  CheckFlags                                                                */
+/*!
+    Filter variables based on their flags
+
+    The CheckFlags function will query the specified varserver variable's
+    flags to see if one or more of the flags match those specified to be
+    handled by this instance of fcgi_vars.  If one or more flags match
+    then the variable may be processed, otherwise it will be skipped.
+
+    @param[in]
+        pState
+            pointer to the FCGIVars state object that contains the flags filter
+
+    @param[in]
+        hVar
+            handle to the variable being processed
+
+    @retval hVar if the variable passed the flags filter
+    @retval VAR_INVALID the variable did not pass the filter
+
+==============================================================================*/
+static VAR_HANDLE CheckFlags( FCGIVarsState *pState, VAR_HANDLE hVar )
+{
+    VAR_HANDLE handle = VAR_INVALID;
+    VarFlags flags;
+    int rc;
+
+    if ( ( pState != NULL ) &&
+         ( hVar != VAR_INVALID ) )
+    {
+        if ( pState->flags == VARFLAG_NONE )
+        {
+            handle = hVar;
+        }
+        else
+        {
+            /* get the flags for the variable from the varserver */
+            rc = VAR_GetFlags( pState->hVarServer, hVar, &flags );
+            if ( rc == EOK )
+            {
+                /* check if the flags for the variable contain
+                   ANY of the flags specified */
+                if ( pState->flags & flags )
+                {
+                    /* if any of the flags are found, allow the query */
+                    handle = hVar;
+                }
+            }
+        }
+    }
+
+    return handle;
+}
+
+/*============================================================================*/
 /*  ProcessSetRequest                                                         */
 /*!
     Process a Variable Set Request
@@ -1053,6 +1127,7 @@ static int ProcessNameQuery( FCGIVarsState *pState, char *query )
             pointer to the comma separated list of variable names/values
 
     @retval EOK query processed successfully
+    @retval ENOTSUP one or more variables were not allowed to be set
     @retval EINVAL invalid arguments
 
 ==============================================================================*/
@@ -1068,19 +1143,27 @@ static int ProcessSetRequest( FCGIVarsState *pState, char *query )
     {
         result = EOK;
 
-        /* get a pointer to the name/value tuple */
-        pTuple = strtok_r( query, ",", &save );
-        while ( pTuple != NULL )
+        if ( pState->readonly == false )
         {
-            /* process a set request tuple */
-            rc = ProcessSetTuple( pState, pTuple );
-            if ( rc != EOK )
+            /* get a pointer to the name/value tuple */
+            pTuple = strtok_r( query, ",", &save );
+            while ( pTuple != NULL )
             {
-                result = rc;
-            }
+                /* process a set request tuple */
+                rc = ProcessSetTuple( pState, pTuple );
+                if ( rc != EOK )
+                {
+                    result = rc;
+                }
 
-            /* get the next name/value tuple */
-            pTuple = strtok_r( NULL, ",", &save );
+                /* get the next name/value tuple */
+                pTuple = strtok_r( NULL, ",", &save );
+            }
+        }
+        else
+        {
+            /* don't allow sets in readonly mode */
+            result = ENOTSUP;
         }
     }
 
@@ -1113,6 +1196,7 @@ static int ProcessSetTuple( FCGIVarsState *pState, char *pTuple )
     char *pValue;
     char *pName;
     VAR_HANDLE hVar;
+    VarFlags flags = VARFLAG_NONE;
 
     if ( ( pState != NULL ) &&
          ( pTuple != NULL ) )
@@ -1123,6 +1207,20 @@ static int ProcessSetTuple( FCGIVarsState *pState, char *pTuple )
         {
             *pValue++ = 0;
             pName = pTuple;
+
+            /* look up the variable using its name */
+            hVar = VAR_FindByName( pState->hVarServer, pName );
+            if( hVar != VAR_INVALID )
+            {
+                if ( pState->flags != VARFLAG_NONE )
+                {
+                    VAR_GetFlags( pState->hVarServer, hVar, &flags );
+                    if ( ( pState->flags & flags ) == VARFLAG_NONE )
+                    {
+                        return ENOTSUP;
+                    }
+                }
+            }
 
             /* set the name/value */
             result = VAR_SetNameValue( pState->hVarServer,
@@ -1243,9 +1341,6 @@ static int ProcessSelectClearCache( FCGIVarsState *pState, char *name )
 static int ProcessMatchQuery( FCGIVarsState *pState, char *query )
 {
     int result = EINVAL;
-    char *save;
-    char *pName;
-    VAR_HANDLE hVar;
     int rc;
     VarQuery varQuery;
     VarObject obj;
@@ -1259,10 +1354,73 @@ static int ProcessMatchQuery( FCGIVarsState *pState, char *query )
         memset( &varQuery, 0, sizeof( VarQuery ) );
 
         // set up the query
-        varQuery.type = QUERY_MATCH;
+        varQuery.type = QUERY_MATCH | QUERY_FLAGS;
         varQuery.match = query;
         varQuery.instanceID = 0;
-        varQuery.flags = 0;
+        varQuery.flags = pState->flags;
+
+        // find the first matching variable
+        rc = VAR_GetFirst( pState->hVarServer, &varQuery, &obj );
+        while ( rc == EOK )
+        {
+            if( varQuery.hVar != VAR_INVALID )
+            {
+                /* add the variable to the variable cache */
+                VARCACHE_AddUnique( pState->pVarCache, varQuery.hVar );
+            }
+            else
+            {
+                break;
+            }
+
+            // get the next matching variable
+            rc = VAR_GetNext( pState->hVarServer, &varQuery, &obj );
+        }
+    }
+
+    return result;
+}
+
+/*============================================================================*/
+/*  ProcessInstanceQuery                                                         */
+/*!
+    Process a Variable Match Query
+
+    The ProcessInstanceQuery function processes all variables with the
+    specified instance ID and appends the variable handles to the
+    FCGIVarsState VarCache object
+
+    @param[in]
+        pState
+            pointer to the FCGIVars state object
+
+    @param[in]
+        query
+            pointer to the instance identifier string
+
+    @retval EOK query processed successfully
+    @retval EINVAL invalid arguments
+
+==============================================================================*/
+static int ProcessInstanceQuery( FCGIVarsState *pState, char *query )
+{
+    int result = EINVAL;
+    int rc;
+    VarQuery varQuery;
+    VarObject obj;
+
+    if ( ( pState != NULL ) &&
+         ( query != NULL ) )
+    {
+        result = EOK;
+
+        // clear the query object
+        memset( &varQuery, 0, sizeof( VarQuery ) );
+
+        // set up the query
+        varQuery.type = QUERY_INSTANCEID | QUERY_FLAGS;
+        varQuery.instanceID = atol( query );
+        varQuery.flags = pState->flags;
 
         // find the first matching variable
         rc = VAR_GetFirst( pState->hVarServer, &varQuery, &obj );
@@ -1394,21 +1552,21 @@ static int OutputVar( VAR_HANDLE hVar, void *arg )
 {
     FCGIVarsState *pState = (FCGIVarsState *)arg;
     char *pData;
-    char name[BUFSIZ];
     int result = EINVAL;
     int fd;
     char prefix;
+    VarInfo info;
 
     if ( ( pState != NULL ) &&
          ( hVar != VAR_INVALID ) )
     {
         fd = VARFP_GetFd( pState->pVarFP );
 
-        /* get the variable name */
-        if( VAR_GetName( pState->hVarServer,
-                         hVar,
-                         name,
-                         sizeof( name ) ) == EOK )
+        /* get the variable info */
+        if ( VAR_GetInfo( pState->hVarServer,
+                          hVar,
+                          &info ) == EOK )
+
         {
             /* print the variable value to the output buffer */
             if( VAR_Print( pState->hVarServer,
@@ -1426,7 +1584,7 @@ static int OutputVar( VAR_HANDLE hVar, void *arg )
                     prefix = ( pState->outputCount > 0 ) ? ',' : ' ';
 
                     /* output the data */
-                    OutputJSONVar( prefix, name, pData );
+                    OutputJSONVar( prefix, &info, pData );
 
                     /* clear the memory */
                     pData[0] = '\0';
@@ -1494,6 +1652,11 @@ static void SetupTerminationHandler( void )
 ==============================================================================*/
 static void TerminationHandler( int signum, siginfo_t *info, void *ptr )
 {
+    /* signum, info, and ptr are unused */
+    (void)signum;
+    (void)info;
+    (void)ptr;
+
     VARSERVER_Close( state.hVarServer );
     VARFP_Close( state.pVarFP );
 }
@@ -1535,8 +1698,8 @@ static void SendVarsHeader( void )
     { "name" : "some name", "value" : "some value" }
 
     @param[in]
-        name
-            name of the variable
+        info
+            pointer to the variable information
 
     @param[in]
         value
@@ -1546,26 +1709,55 @@ static void SendVarsHeader( void )
     @retval EINVAL invalid arguments
 
 ==============================================================================*/
-static int OutputJSONVar( char prefix, char *name, char *value )
+static int OutputJSONVar( char prefix, VarInfo *info, char *value )
 {
     int result = EINVAL;
 
-    if ( ( name != NULL ) &&
+    if ( ( info != NULL ) &&
          ( value != NULL ) )
     {
         if (IsJSON( value ) == true )
         {
-            printf( "%c{ \"name\": \"%s\", \"value\" : %s }",
-                    prefix,
-                    name,
-                    value );
+            if ( info->instanceID == 0 )
+            {
+                printf( "%c{ \"name\": \"%s\", "
+                        "\"value\" : %s }",
+                        prefix,
+                        info->name,
+                        value );
+
+            }
+            else
+            {
+                printf( "%c{ \"name\": \"%s\", "
+                        "\"instanceID\" : %d, "
+                        "\"value\" : %s }",
+                        prefix,
+                        info->name,
+                        info->instanceID,
+                        value );
+            }
         }
         else
         {
-            printf( "%c{ \"name\": \"%s\", \"value\" : \"%s\" }",
-                    prefix,
-                    name,
-                    value );
+            if ( info->instanceID == 0 )
+            {
+                printf( "%c{ \"name\": \"%s\", "
+                        "\"value\" : \"%s\" }",
+                        prefix,
+                        info->name,
+                        value );
+            }
+            else
+            {
+                printf( "%c{ \"name\": \"%s\", "
+                        "\"instanceID\" : %d, "
+                        "\"value\" : \"%s\" }",
+                        prefix,
+                        info->name,
+                        info->instanceID,
+                        value );
+            }
         }
 
         result = EOK;
@@ -1655,7 +1847,6 @@ static int ErrorResponse( int status,  char *description )
 ==============================================================================*/
 static bool IsJSON( char *value )
 {
-    char c;
     char c_start = ' ';
     char c_end = ' ';
     bool result = false;
