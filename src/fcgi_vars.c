@@ -1556,6 +1556,7 @@ static int OutputVar( VAR_HANDLE hVar, void *arg )
     int fd;
     char prefix;
     VarInfo info;
+    ssize_t n;
 
     if ( ( pState != NULL ) &&
          ( hVar != VAR_INVALID ) )
@@ -1574,7 +1575,12 @@ static int OutputVar( VAR_HANDLE hVar, void *arg )
                            fd ) == EOK )
             {
                 /* NUL terminate */
-                (void)write( fd, "\0", 1 );
+                n = write( fd, "\0", 1 );
+                if ( n != 1 )
+                {
+                    /* I/O error */
+                    result = EIO;
+                }
 
                 /* get a handle to the output buffer */
                 pData = VARFP_GetData( pState->pVarFP );
