@@ -1870,39 +1870,41 @@ static bool IsJSON( char *value )
     {
         // get the length of the string
         len = strlen(value);
-
-        // get the first non-space character at the
-        // beginning of the value
-        while(isspace(value[i]) && ( i < len))
+        if ( len > 0 )
         {
-            i++;
-        }
+            // get the first non-space character at the
+            // beginning of the value
+            while(isspace(value[i]) && ( i < len))
+            {
+                i++;
+            }
 
-        if ( i < len )
-        {
-            c_start = value[i];
-        }
+            if ( i < len )
+            {
+                c_start = value[i];
+            }
 
-        // search for the first non-whitespace character at the
-        // end of the value
-        i = len-1;
-        while(isspace(value[i]) && ( i >= 0 ))
-        {
-            i--;
-        }
+            // search for the first non-whitespace character at the
+            // end of the value
+            i = len-1;
+            while(isspace(value[i]) && ( i >= 0 ))
+            {
+                i--;
+            }
 
-        if ( i >= 0 )
-        {
-            c_end = value[i];
-        }
+            if ( i >= 0 )
+            {
+                c_end = value[i];
+            }
 
-        // check if we have a JSON object
-        if ( ( c_start == '[' && c_end == ']' ) ||
-             ( c_start == '{' && c_end == '}' ) )
-        {
-            // probably a JSON object since the start and end
-            // characters of the value are '
-            result = true;
+            // check if we have a JSON object
+            if ( ( c_start == '[' && c_end == ']' ) ||
+                ( c_start == '{' && c_end == '}' ) )
+            {
+                // probably a JSON object since the start and end
+                // characters of the value are '
+                result = true;
+            }
         }
     }
 
