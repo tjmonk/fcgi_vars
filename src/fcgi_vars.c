@@ -1354,10 +1354,17 @@ static int ProcessMatchQuery( FCGIVarsState *pState, char *query )
         memset( &varQuery, 0, sizeof( VarQuery ) );
 
         // set up the query
-        varQuery.type = QUERY_MATCH | QUERY_FLAGS;
+        if ( pState->flags != VARFLAG_NONE )
+        {
+            varQuery.type = QUERY_MATCH | QUERY_FLAGS;
+            varQuery.flags = pState->flags;
+        }
+        else
+        {
+            varQuery.type = QUERY_MATCH;
+        }
+
         varQuery.match = query;
-        varQuery.instanceID = 0;
-        varQuery.flags = pState->flags;
 
         // find the first matching variable
         rc = VAR_GetFirst( pState->hVarServer, &varQuery, &obj );
