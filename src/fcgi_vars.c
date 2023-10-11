@@ -57,6 +57,7 @@ SOFTWARE.
 #include <varserver/varserver.h>
 #include <varserver/varcache.h>
 #include <varserver/varfp.h>
+#include <sessionmgr/sessionmgr.h>
 #include <fcgi_stdio.h>
 
 /*==============================================================================
@@ -108,6 +109,9 @@ typedef struct _FCGIVarsState
 
     /*! read only flag */
     bool readonly;
+
+    /*! authentication required */
+    bool auth;
 
     /*! variable flags */
     VarFlags flags;
@@ -255,6 +259,11 @@ int main(int argc, char **argv)
     state.hVarServer = VARSERVER_Open();
     if( state.hVarServer != NULL )
     {
+        if ( state.auth == true )
+        {
+            VARSERVER_SetGroup();
+        }
+
         /* allocate memory for the POST data buffer */
         if( AllocatePOSTBuffer( &state ) == EOK )
         {
@@ -373,7 +382,7 @@ static int ProcessOptions( int argC, char *argV[], FCGIVarsState *pState )
 {
     int c;
     int result = EINVAL;
-    const char *options = "hvl:rf:";
+    const char *options = "hvl:rf:a";
 
     if( ( pState != NULL ) &&
         ( argV != NULL ) )
@@ -390,6 +399,10 @@ static int ProcessOptions( int argC, char *argV[], FCGIVarsState *pState )
 
                 case 'l':
                     pState->maxPostLength = strtoul( optarg, NULL, 0 );
+                    break;
+
+                case 'a':
+                    pState->auth = true;
                     break;
 
                 case 'r':
@@ -612,10 +625,20 @@ static int ProcessGETRequest( FCGIVarsState *pState )
         {
             result = SendVarsResponse( pState );
         }
-	else
-	{
-	    result = ErrorResponse( 400, "Bad request" );
-	}
+        else
+        {
+            switch( result )
+            {
+                case EPERM:
+                case EACCES:
+                    result = ErrorResponse( 401, "Unauthorized" );
+                    break;
+
+                default:
+                    result = ErrorResponse( 400, "Bad request" );
+                    break;
+            }
+        }
     }
 
     return result;
@@ -795,6 +818,10 @@ static int ProcessQuery( FCGIVarsState *pState, char *query )
     int result = EINVAL;
     int n1;
     int n2;
+    char session[SESSION_ID_LEN+1];
+    char *pSession;
+    uid_t uid;
+    uid_t olduid = getuid();
 
     QueryFunc fn1[] =
     {
@@ -817,26 +844,50 @@ static int ProcessQuery( FCGIVarsState *pState, char *query )
     if ( ( pState != NULL ) &&
          ( query != NULL ) )
     {
-        /* select the default cache */
-        ProcessSelectCache( pState, "default" );
+        result = EOK;
 
-        /* clear the cache */
-        VARCACHE_Clear( pState->pVarCache );
-
-        /* set up query parameters, eg cache name */
-        result = ProcessQueryFunctions( pState,
-                                        query,
-                                        fn1,
-                                        n1 );
-        if ( result == EOK )
+        if ( pState->auth == true  )
         {
-            /* perform variable query */
-            result = ProcessQueryFunctions( pState,
-                                            query,
-                                            fn2,
-                                            n2 );
+            pSession = SESSIONMGR_GetSessionFromCookie(
+                            getenv("HTTP_COOKIE"),
+                            session,
+                            sizeof(session) );
+
+            result = SESSIONMGR_Validate( pSession, &uid );
+            if ( result == EOK )
+            {
+                seteuid( uid );
+                VARSERVER_UpdateUser( pState->hVarServer );
+            }
         }
 
+        if ( result == EOK )
+        {
+            /* select the default cache */
+            ProcessSelectCache( pState, "default" );
+
+            /* clear the cache */
+            VARCACHE_Clear( pState->pVarCache );
+
+            /* set up query parameters, eg cache name */
+            result = ProcessQueryFunctions( pState,
+                                            query,
+                                            fn1,
+                                            n1 );
+            if ( result == EOK )
+            {
+                /* perform variable query */
+                result = ProcessQueryFunctions( pState,
+                                                query,
+                                                fn2,
+                                                n2 );
+            }
+        }
+
+        if ( pState->auth == true )
+        {
+            seteuid(olduid);
+        }
     }
 
     return result;
