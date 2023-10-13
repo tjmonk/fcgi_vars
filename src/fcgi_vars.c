@@ -856,7 +856,11 @@ static int ProcessQuery( FCGIVarsState *pState, char *query )
             result = SESSIONMGR_Validate( pSession, &uid );
             if ( result == EOK )
             {
-                seteuid( uid );
+                if ( seteuid( uid ) != 0 )
+                {
+                    result = errno;
+                }
+
                 VARSERVER_UpdateUser( pState->hVarServer );
             }
         }
@@ -886,7 +890,10 @@ static int ProcessQuery( FCGIVarsState *pState, char *query )
 
         if ( pState->auth == true )
         {
-            seteuid(olduid);
+            if ( seteuid(olduid) != 0 )
+            {
+                result = errno;
+            }
         }
     }
 
