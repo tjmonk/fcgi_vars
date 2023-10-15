@@ -101,6 +101,12 @@ typedef struct _FCGIVarsState
     /*! Variable Output buffer */
     VarFP *pVarFP;
 
+    /*! user id of current user */
+    uid_t uid;
+
+    /*! user id of previous user */
+    uid_t olduid;
+
     /*! count of the output variables */
     size_t outputCount;
 
@@ -160,6 +166,8 @@ static int ProcessPOSTRequest( FCGIVarsState *pState );
 static int GetPOSTData( FCGIVarsState *pState, size_t length );
 static int ProcessUnsupportedRequest( FCGIVarsState *pState );
 static int ProcessQuery( FCGIVarsState *pState, char *request );
+
+static int CheckAuthentication( FCGIVarsState *pState );
 
 static int ProcessQueryFunctions( FCGIVarsState *pState,
                                   char *query,
@@ -818,10 +826,6 @@ static int ProcessQuery( FCGIVarsState *pState, char *query )
     int result = EINVAL;
     int n1;
     int n2;
-    char session[SESSION_ID_LEN+1];
-    char *pSession;
-    uid_t uid;
-    uid_t olduid = getuid();
 
     QueryFunc fn1[] =
     {
@@ -846,38 +850,7 @@ static int ProcessQuery( FCGIVarsState *pState, char *query )
     {
         result = EOK;
 
-        if ( pState->auth == true  )
-        {
-            pSession = SESSIONMGR_GetSessionFromCookie(
-                            getenv("HTTP_COOKIE"),
-                            session,
-                            sizeof(session) );
-            if ( pSession != NULL )
-            {
-                result = SESSIONMGR_Validate( pSession, &uid );
-                if ( result == EOK )
-                {
-                    if ( seteuid( uid ) != 0 )
-                    {
-                        syslog( LOG_ERR, "Failed to set uid to %d", uid );
-                        result = errno;
-                    }
-
-                    VARSERVER_UpdateUser( pState->hVarServer );
-                }
-                else
-                {
-                    syslog( LOG_INFO,
-                            "Failed to validate session %8.8s",
-                            pSession );
-                }
-            }
-            else
-            {
-                syslog( LOG_INFO, "No session info");
-            }
-        }
-
+        result = CheckAuthentication( pState );
         if ( result == EOK )
         {
             /* select the default cache */
@@ -903,12 +876,92 @@ static int ProcessQuery( FCGIVarsState *pState, char *query )
 
         if ( pState->auth == true )
         {
-            if ( seteuid(olduid) != 0 )
+            if ( seteuid(pState->olduid) != 0 )
             {
-                syslog( LOG_ERR, "Failed to restore uid to %d", olduid );
+                syslog( LOG_ERR,
+                        "Failed to restore uid to %d",
+                        pState->olduid );
 
                 result = errno;
             }
+        }
+    }
+
+    return result;
+}
+
+/*============================================================================*/
+/*  CheckAuthentication                                                       */
+/*!
+    Check if requesting user is authenticated
+
+    The CheckAuthentication function checks if the current user is
+    authenticated by extracting the session identifier from the HTTP
+    Authorization cookie and checking with the session manager to
+    see if it is valid.  If the session is valid, the varserver
+    group list is updated to reflect the groups of the current user.
+
+    @param[in]
+        pState
+            pointer to the FCGIVars state object
+
+    @retval EOK the current user is valid or authentication is disabled
+    @retval EACCES access is denied
+    @retval EINVAL invalid arguments
+
+==============================================================================*/
+static int CheckAuthentication( FCGIVarsState *pState )
+{
+    int result = EINVAL;
+    char *pSession;
+    char session[SESSION_ID_LEN+1];
+    uid_t uid;
+
+    if ( pState != NULL )
+    {
+        if ( pState->auth == true  )
+        {
+            pState->olduid = getuid();
+
+            /* get the session id from the HTTP cookie */
+            pSession = SESSIONMGR_GetSessionFromCookie(
+                            getenv("HTTP_COOKIE"),
+                            session,
+                            sizeof(session) );
+            if ( pSession != NULL )
+            {
+                /* check if the session is valid */
+                result = SESSIONMGR_Validate( pSession, &uid );
+                if ( result == EOK )
+                {
+                    /* store the uid of the current user */
+                    pState->uid = uid;
+                    if ( seteuid( uid ) != 0 )
+                    {
+                        syslog( LOG_ERR, "Failed to set uid to %d", uid );
+                        result = errno;
+                    }
+
+                    /* update the varserver user */
+                    result = VARSERVER_UpdateUser( pState->hVarServer );
+                }
+                else
+                {
+                    syslog( LOG_INFO,
+                            "Failed to validate session %8.8s",
+                            pSession );
+                }
+            }
+            else
+            {
+                syslog( LOG_INFO, "No session info");
+                result = EACCES;
+            }
+        }
+        else
+        {
+            /* no authentication necessary */
+            result = EOK;
         }
     }
 
