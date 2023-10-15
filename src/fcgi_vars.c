@@ -168,6 +168,7 @@ static int ProcessUnsupportedRequest( FCGIVarsState *pState );
 static int ProcessQuery( FCGIVarsState *pState, char *request );
 
 static int CheckAuthentication( FCGIVarsState *pState );
+static int RestoreOldUser( FCGIVarsState *pState );
 
 static int ProcessQueryFunctions( FCGIVarsState *pState,
                                   char *query,
@@ -826,6 +827,7 @@ static int ProcessQuery( FCGIVarsState *pState, char *query )
     int result = EINVAL;
     int n1;
     int n2;
+    int rc;
 
     QueryFunc fn1[] =
     {
@@ -872,17 +874,12 @@ static int ProcessQuery( FCGIVarsState *pState, char *query )
                                                 fn2,
                                                 n2 );
             }
-        }
 
-        if ( pState->auth == true )
-        {
-            if ( seteuid(pState->olduid) != 0 )
+            /* restore the original process user id before it was changed */
+            rc = RestoreOldUser( pState );
+            if ( ( result == EOK ) && ( rc != EOK ) )
             {
-                syslog( LOG_ERR,
-                        "Failed to restore uid to %d",
-                        pState->olduid );
-
-                result = errno;
+                result = rc;
             }
         }
     }
@@ -938,8 +935,8 @@ static int CheckAuthentication( FCGIVarsState *pState )
                     pState->uid = uid;
                     if ( seteuid( uid ) != 0 )
                     {
-                        syslog( LOG_ERR, "Failed to set uid to %d", uid );
                         result = errno;
+                        syslog( LOG_ERR, "Failed to set uid to %d", uid );
                     }
 
                     /* update the varserver user */
@@ -961,6 +958,53 @@ static int CheckAuthentication( FCGIVarsState *pState )
         else
         {
             /* no authentication necessary */
+            result = EOK;
+        }
+    }
+
+    return result;
+}
+
+/*============================================================================*/
+/*  RestoreOldUser                                                            */
+/*!
+    Restore the original user for the fcgi_vars process
+
+    The RestoreOldUser function restores the original user for the
+    fcgi_vars process before it was changed by a session authentication
+
+    @param[in]
+        pState
+            pointer to the FCGIVars state object
+
+    @retval EOK the original user was restored, or authentication is disabled
+    @retval EINVAL invalid arguments
+    @retval other error from seteuid
+
+==============================================================================*/
+static int RestoreOldUser( FCGIVarsState *pState )
+{
+    int result = EINVAL;
+
+    if ( pState != NULL )
+    {
+        if ( pState->auth == true )
+        {
+            if ( seteuid(pState->olduid) == 0 )
+            {
+                result = EOK;
+            }
+            else
+            {
+                result = errno;
+
+                syslog( LOG_ERR,
+                        "Failed to restore uid to %d",
+                        pState->olduid );
+            }
+        }
+        else
+        {
             result = EOK;
         }
     }
