@@ -67,6 +67,48 @@ SOFTWARE.
 /*! Maximum POST content length */
 #define MAX_POST_LENGTH         1024L
 
+/*! no session info found in HTTP headers */
+#define ERROR_NO_SESSION_INFO   0x01
+
+/*! session validation failed */
+#define ERROR_SESSION_VALIDATION 0x02
+
+/*! cannot update varserver user */
+#define ERROR_UPDATE_USER 0x04
+
+/*! No query specified */
+#define ERROR_NO_QUERY 0x08
+
+/*! Authentication failure */
+#define ERROR_AUTHENTICATION 0x10
+
+/*! cache query error */
+#define ERROR_CACHE_QUERY 0x20
+
+/*! data query error */
+#define ERROR_DATA_QUERY 0x40
+
+/*! failed to set user id */
+#define ERROR_SET_UID 0x80
+
+/*! variable not found error */
+#define ERROR_VARIABLE_NOT_FOUND 0x100
+
+/*! cache adding error */
+#define ERROR_CACHE_ADD 0x200
+
+/*! error read only */
+#define ERROR_READ_ONLY 0x400
+
+/*! no content length specified */
+#define ERROR_NO_CONTENT_LENGTH 0x800
+
+/*! illegal content length specified */
+#define ERROR_INVALID_CONTENT_LENGTH 0x1000
+
+/*! unsupported request */
+#define ERROR_UNSUPPORTED_REQUEST 0x2000
+
 /*! node for managing a list of variable caches */
 typedef struct _cacheNode
 {
@@ -121,6 +163,9 @@ typedef struct _FCGIVarsState
 
     /*! variable flags */
     VarFlags flags;
+
+    /*! error code to report to client */
+    uint32_t errorCode;
 
 } FCGIVarsState;
 
@@ -204,7 +249,7 @@ static HandlerFunction GetHandlerFunction( char *method,
 static int OutputJSONVar( char prefix, VarInfo *info, char *value );
 static void SendVarsHeader( void );
 static void SendVarsFooter( int count );
-static int ErrorResponse( int status,  char *description );
+static int ErrorResponse( int status,  char *description, uint32_t errorCode );
 static bool IsJSON( char *value );
 
 static VarCache *GetCache( FCGIVarsState *pState, char *name );
@@ -479,6 +524,9 @@ static int ProcessRequests( FCGIVarsState *pState,
         /* wait for an FCGI request */
         while( FCGI_Accept() >= 0 )
         {
+            /* reset error code */
+            pState->errorCode = 0;
+
             /* check the request method */
             method = getenv("REQUEST_METHOD");
             if ( method != NULL )
@@ -640,11 +688,15 @@ static int ProcessGETRequest( FCGIVarsState *pState )
             {
                 case EPERM:
                 case EACCES:
-                    result = ErrorResponse( 401, "Unauthorized" );
+                    result = ErrorResponse( 401,
+                                            "Unauthorized",
+                                            pState->errorCode );
                     break;
 
                 default:
-                    result = ErrorResponse( 400, "Bad request" );
+                    result = ErrorResponse( 400,
+                                            "Bad request",
+                                            pState->errorCode );
                     break;
             }
         }
@@ -705,13 +757,19 @@ static int ProcessPOSTRequest( FCGIVarsState *pState )
             else
             {
                 /* content length is too large (or too small) */
-                ErrorResponse( 413, "Invalid Content-Length" );
+                pState->errorCode |= ERROR_INVALID_CONTENT_LENGTH;
+                ErrorResponse( 413,
+                               "Invalid Content-Length",
+                               pState->errorCode );
             }
         }
         else
         {
             /* unable to get content length */
-            ErrorResponse( 413, "Invalid Content-Length" );
+            pState->errorCode |= ERROR_NO_CONTENT_LENGTH;
+            ErrorResponse( 413,
+                           "Invalid Content-Length",
+                           pState->errorCode );
         }
     }
 
@@ -797,7 +855,11 @@ static int ProcessUnsupportedRequest( FCGIVarsState *pState )
 
     if ( pState != NULL )
     {
-        result = ErrorResponse( 405, "Method Not Allowed" );
+        pState->errorCode |= ERROR_UNSUPPORTED_REQUEST;
+
+        result = ErrorResponse( 405,
+                                "Method Not Allowed",
+                                pState->errorCode );
     }
 
     return result;
@@ -873,6 +935,14 @@ static int ProcessQuery( FCGIVarsState *pState, char *query )
                                                 query,
                                                 fn2,
                                                 n2 );
+                if ( result == EOK )
+                {
+                    pState->errorCode |= ERROR_DATA_QUERY;
+                }
+            }
+            else
+            {
+                pState->errorCode |= ERROR_CACHE_QUERY;
             }
 
             /* restore the original process user id before it was changed */
@@ -882,6 +952,15 @@ static int ProcessQuery( FCGIVarsState *pState, char *query )
                 result = rc;
             }
         }
+        else
+        {
+            pState->errorCode |= ERROR_AUTHENTICATION;
+        }
+    }
+    else
+    {
+        /* cannot find query string */
+        pState->errorCode |= ERROR_NO_QUERY;
     }
 
     return result;
@@ -935,15 +1014,22 @@ static int CheckAuthentication( FCGIVarsState *pState )
                     pState->uid = uid;
                     if ( seteuid( uid ) != 0 )
                     {
+                        pState->errorCode |= ERROR_SET_UID;
                         result = errno;
                         syslog( LOG_ERR, "Failed to set uid to %d", uid );
                     }
 
                     /* update the varserver user */
                     result = VARSERVER_UpdateUser( pState->hVarServer );
+                    if ( result != EOK )
+                    {
+                        pState->errorCode |= ERROR_UPDATE_USER;
+                    }
                 }
                 else
                 {
+                    pState->errorCode |= ERROR_SESSION_VALIDATION;
+
                     syslog( LOG_INFO,
                             "Failed to validate session %8.8s",
                             pSession );
@@ -951,6 +1037,8 @@ static int CheckAuthentication( FCGIVarsState *pState )
             }
             else
             {
+                pState->errorCode |= ERROR_NO_SESSION_INFO;
+
                 syslog( LOG_INFO, "No session info");
                 result = EACCES;
             }
@@ -1208,12 +1296,14 @@ static int ProcessNameQuery( FCGIVarsState *pState, char *query )
                 rc = VARCACHE_AddUnique( pState->pVarCache, hVar );
                 if( rc != EOK )
                 {
+                    pState->errorCode |= ERROR_CACHE_ADD;
                     result = rc;
                 }
             }
             else
             {
                 /* variable not found */
+                pState->errorCode |= ERROR_VARIABLE_NOT_FOUND;
                 result = ENOENT;
             }
 
@@ -1333,6 +1423,7 @@ static int ProcessSetRequest( FCGIVarsState *pState, char *query )
         else
         {
             /* don't allow sets in readonly mode */
+            pState->errorCode |= ERROR_READ_ONLY;
             result = ENOTSUP;
         }
     }
@@ -1983,11 +2074,15 @@ static void SendVarsFooter( int count )
         description
             status response description
 
+    @param[in]
+        errorCode
+            internal error code
+
     @retval EOK the response was sent
     @retval EINVAL invalid arguments
 
 ==============================================================================*/
-static int ErrorResponse( int status,  char *description )
+static int ErrorResponse( int status,  char *description, uint32_t errorCode )
 {
     int result = EINVAL;
 
@@ -1998,9 +2093,12 @@ static int ErrorResponse( int status,  char *description )
         printf("Content-Type: application/json\r\n\r\n");
 
         /* output body */
-        printf("{\"status\": %d, \"description\" : \"%s\"}",
+        printf("{\"status\": %d, "
+               "\"description\" : \"%s\", "
+               "\"errorcode\" : \"0x%04X\"}",
                 status,
-                description );
+                description,
+                errorCode );
 
         result = EOK;
 
