@@ -852,16 +852,29 @@ static int ProcessQuery( FCGIVarsState *pState, char *query )
                             getenv("HTTP_COOKIE"),
                             session,
                             sizeof(session) );
-
-            result = SESSIONMGR_Validate( pSession, &uid );
-            if ( result == EOK )
+            if ( pSession != NULL )
             {
-                if ( seteuid( uid ) != 0 )
+                result = SESSIONMGR_Validate( pSession, &uid );
+                if ( result == EOK )
                 {
-                    result = errno;
-                }
+                    if ( seteuid( uid ) != 0 )
+                    {
+                        syslog( LOG_ERR, "Failed to set uid to %d", uid );
+                        result = errno;
+                    }
 
-                VARSERVER_UpdateUser( pState->hVarServer );
+                    VARSERVER_UpdateUser( pState->hVarServer );
+                }
+                else
+                {
+                    syslog( LOG_INFO,
+                            "Failed to validate session %8.8s",
+                            pSession );
+                }
+            }
+            else
+            {
+                syslog( LOG_INFO, "No session info");
             }
         }
 
@@ -892,6 +905,8 @@ static int ProcessQuery( FCGIVarsState *pState, char *query )
         {
             if ( seteuid(olduid) != 0 )
             {
+                syslog( LOG_ERR, "Failed to restore uid to %d", olduid );
+
                 result = errno;
             }
         }
