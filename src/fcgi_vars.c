@@ -1604,7 +1604,6 @@ static int ProcessMatchQuery( FCGIVarsState *pState, char *query )
     int result = EINVAL;
     int rc;
     VarQuery varQuery;
-    VarObject obj;
 
     if ( ( pState != NULL ) &&
          ( query != NULL ) )
@@ -1628,7 +1627,7 @@ static int ProcessMatchQuery( FCGIVarsState *pState, char *query )
         varQuery.match = query;
 
         // find the first matching variable
-        rc = VAR_GetFirst( pState->hVarServer, &varQuery, &obj );
+        rc = VAR_GetFirst( pState->hVarServer, &varQuery, NULL );
         while ( rc == EOK )
         {
             if( varQuery.hVar != VAR_INVALID )
@@ -1642,7 +1641,7 @@ static int ProcessMatchQuery( FCGIVarsState *pState, char *query )
             }
 
             // get the next matching variable
-            rc = VAR_GetNext( pState->hVarServer, &varQuery, &obj );
+            rc = VAR_GetNext( pState->hVarServer, &varQuery, NULL );
         }
     }
 
@@ -1675,7 +1674,6 @@ static int ProcessInstanceQuery( FCGIVarsState *pState, char *query )
     int result = EINVAL;
     int rc;
     VarQuery varQuery;
-    VarObject obj;
 
     if ( ( pState != NULL ) &&
          ( query != NULL ) )
@@ -1691,7 +1689,7 @@ static int ProcessInstanceQuery( FCGIVarsState *pState, char *query )
         varQuery.flags = pState->flags;
 
         // find the first matching variable
-        rc = VAR_GetFirst( pState->hVarServer, &varQuery, &obj );
+        rc = VAR_GetFirst( pState->hVarServer, &varQuery, NULL );
         while ( rc == EOK )
         {
             if( varQuery.hVar != VAR_INVALID )
@@ -1705,7 +1703,7 @@ static int ProcessInstanceQuery( FCGIVarsState *pState, char *query )
             }
 
             // get the next matching variable
-            rc = VAR_GetNext( pState->hVarServer, &varQuery, &obj );
+            rc = VAR_GetNext( pState->hVarServer, &varQuery, NULL );
         }
     }
 
