@@ -162,7 +162,7 @@ typedef struct _FCGIVarsState
     bool auth;
 
     /*! variable flags */
-    VarFlags flags;
+    uint32_t flags;
 
     /*! error code to report to client */
     uint32_t errorCode;
@@ -1340,7 +1340,7 @@ static int ProcessNameQuery( FCGIVarsState *pState, char *query )
 static VAR_HANDLE CheckFlags( FCGIVarsState *pState, VAR_HANDLE hVar )
 {
     VAR_HANDLE handle = VAR_INVALID;
-    VarFlags flags;
+    uint32_t flags;
     int rc;
 
     if ( ( pState != NULL ) &&
@@ -1457,7 +1457,7 @@ static int ProcessSetTuple( FCGIVarsState *pState, char *pTuple )
     char *pValue;
     char *pName;
     VAR_HANDLE hVar;
-    VarFlags flags = VARFLAG_NONE;
+    uint32_t flags = 0;
 
     if ( ( pState != NULL ) &&
          ( pTuple != NULL ) )
