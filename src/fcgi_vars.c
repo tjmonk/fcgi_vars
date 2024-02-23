@@ -229,6 +229,7 @@ static int ProcessNameQuery( FCGIVarsState *pState, char *query );
 static int ProcessSetRequest( FCGIVarsState *pState, char *query );
 static int ProcessSetTuple( FCGIVarsState *pState, char *pTuple );
 static int ProcessMatchQuery( FCGIVarsState *pState, char *query );
+static int ProcessTagsQuery( FCGIVarsState *pState, char *query );
 static int ProcessInstanceQuery( FCGIVarsState *pState, char *query );
 static int ProcessSelectCache( FCGIVarsState *pState, char *name );
 static int ProcessSelectClearCache( FCGIVarsState *pState, char *name );
@@ -901,6 +902,7 @@ static int ProcessQuery( FCGIVarsState *pState, char *query )
     {
         { "name=", &ProcessNameQuery },
         { "match=", &ProcessMatchQuery },
+        { "tags=", &ProcessTagsQuery },
         { "instance=", &ProcessInstanceQuery },
         { "set=", &ProcessSetRequest }
     };
@@ -1346,7 +1348,7 @@ static VAR_HANDLE CheckFlags( FCGIVarsState *pState, VAR_HANDLE hVar )
     if ( ( pState != NULL ) &&
          ( hVar != VAR_INVALID ) )
     {
-        if ( pState->flags == VARFLAG_NONE )
+        if ( pState->flags == 0 )
         {
             handle = hVar;
         }
@@ -1649,7 +1651,81 @@ static int ProcessMatchQuery( FCGIVarsState *pState, char *query )
 }
 
 /*============================================================================*/
-/*  ProcessInstanceQuery                                                         */
+/*  ProcessTagsQuery                                                          */
+/*!
+    Process a Variable Tags Query
+
+    The ProcessTagsQuery function processes a variable tags string
+    and appends the variable handles to the FCGIVarsState VarCache object
+
+    @param[in]
+        pState
+            pointer to the FCGIVars state object
+
+    @param[in]
+        query
+            pointer to the string to match against the variable names
+
+    @retval EOK query processed successfully
+    @retval EINVAL invalid arguments
+
+==============================================================================*/
+static int ProcessTagsQuery( FCGIVarsState *pState, char *query )
+{
+    int result = EINVAL;
+    int rc;
+    VarQuery varQuery;
+    size_t len;
+
+    if ( ( pState != NULL ) &&
+         ( query != NULL ) )
+    {
+        result = EOK;
+
+        // clear the query object
+        memset( &varQuery, 0, sizeof( VarQuery ) );
+
+        // set up the query
+        if ( pState->flags != 0 )
+        {
+            varQuery.type = QUERY_TAGS | QUERY_FLAGS;
+            varQuery.flags = pState->flags;
+        }
+        else
+        {
+            varQuery.type = QUERY_TAGS;
+        }
+
+        len = strlen( query );
+        if ( len < MAX_TAGSPEC_LEN )
+        {
+            strcpy( varQuery.tagspec, query );
+        }
+
+        // find the first matching variable
+        rc = VAR_GetFirst( pState->hVarServer, &varQuery, NULL );
+        while ( rc == EOK )
+        {
+            if( varQuery.hVar != VAR_INVALID )
+            {
+                /* add the variable to the variable cache */
+                VARCACHE_AddUnique( pState->pVarCache, varQuery.hVar );
+            }
+            else
+            {
+                break;
+            }
+
+            // get the next matching variable
+            rc = VAR_GetNext( pState->hVarServer, &varQuery, NULL );
+        }
+    }
+
+    return result;
+}
+
+/*============================================================================*/
+/*  ProcessInstanceQuery                                                      */
 /*!
     Process a Variable Match Query
 
