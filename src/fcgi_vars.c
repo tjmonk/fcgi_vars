@@ -332,14 +332,20 @@ int main(int argc, char **argv)
             syslog( LOG_ERR, "Cannot allocate POST buffer" );
         }
 
-        VARSERVER_Close( state.hVarServer );
+        if ( VARSERVER_Close( state.hVarServer ) == EOK )
+        {
+            state.hVarServer = NULL;
+        }
     }
     else
     {
         syslog( LOG_ERR, "Cannot open variable server" );
     }
 
-    VARFP_Close( state.pVarFP );
+    if ( VARFP_Close( state.pVarFP ) == EOK )
+    {
+        state.pVarFP = NULL;
+    }
 
     return 0;
 }
@@ -2005,8 +2011,15 @@ static void TerminationHandler( int signum, siginfo_t *info, void *ptr )
     (void)info;
     (void)ptr;
 
-    VARSERVER_Close( state.hVarServer );
-    VARFP_Close( state.pVarFP );
+    if ( VARSERVER_Close( state.hVarServer ) == EOK )
+    {
+        state.hVarServer = NULL;
+    }
+
+    if ( VARFP_Close( state.pVarFP ) == EOK )
+    {
+        state.pVarFP = NULL;
+    }
 }
 
 /*============================================================================*/
