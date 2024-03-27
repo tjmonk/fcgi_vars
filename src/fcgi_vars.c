@@ -2020,6 +2020,8 @@ static void TerminationHandler( int signum, siginfo_t *info, void *ptr )
     {
         state.pVarFP = NULL;
     }
+
+    exit(1);
 }
 
 /*============================================================================*/
