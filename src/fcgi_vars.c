@@ -53,7 +53,9 @@ SOFTWARE.
 #include <syslog.h>
 #include <signal.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <ctype.h>
+#include <pwd.h>
 #include <varserver/varserver.h>
 #include <varserver/varcache.h>
 #include <varserver/varfp.h>
@@ -143,6 +145,9 @@ typedef struct _FCGIVarsState
     /*! Variable Output buffer */
     VarFP *pVarFP;
 
+    /*! Unauthenticated user */
+    uid_t unauthenticated_user;
+
     /*! user id of current user */
     uid_t uid;
 
@@ -201,6 +206,7 @@ typedef struct _fcgi_handler
 int main(int argc, char **argv);
 static int InitState( FCGIVarsState *pState );
 static int ProcessOptions( int argC, char *argV[], FCGIVarsState *pState );
+static uid_t GetUserID( const char *username );
 static void usage( char *cmdname );
 static int ProcessRequests( FCGIVarsState *pState,
                             FCGIHandler *pFCGIHandlers,
@@ -213,6 +219,7 @@ static int ProcessUnsupportedRequest( FCGIVarsState *pState );
 static int ProcessQuery( FCGIVarsState *pState, char *request );
 
 static int CheckAuthentication( FCGIVarsState *pState );
+static int SetUser( FCGIVarsState *pState, uid_t uid );
 static int RestoreOldUser( FCGIVarsState *pState );
 
 static int ProcessQueryFunctions( FCGIVarsState *pState,
@@ -377,6 +384,9 @@ static int InitState( FCGIVarsState *pState )
         /* set the default POST content length */
         pState->maxPostLength = MAX_POST_LENGTH;
 
+        /* set the unauthenticated user id */
+        pState->unauthenticated_user = (uid_t)-1;
+
         result = EOK;
     }
 
@@ -443,7 +453,7 @@ static int ProcessOptions( int argC, char *argV[], FCGIVarsState *pState )
 {
     int c;
     int result = EINVAL;
-    const char *options = "hvl:rf:a";
+    const char *options = "hvl:rf:au:";
 
     if( ( pState != NULL ) &&
         ( argV != NULL ) )
@@ -478,6 +488,10 @@ static int ProcessOptions( int argC, char *argV[], FCGIVarsState *pState )
                     usage( argV[0] );
                     break;
 
+                case 'u':
+                    pState->unauthenticated_user = GetUserID(optarg);
+                    break;
+
                 default:
                     result = ENOTSUP;
                     break;
@@ -487,6 +501,40 @@ static int ProcessOptions( int argC, char *argV[], FCGIVarsState *pState )
     }
 
     return result;
+}
+
+/*============================================================================*/
+/*  GetUserID                                                                 */
+/*!
+    Get the user id associated with a user name
+
+    The GetUserID function gets the user id associated with a user name
+    from the password database.
+
+    @param[in]
+        username
+            name of the user to lookup
+
+
+    @retval user id associated with the username
+    @retval (uid_t)-1 if the user name was not found
+
+==============================================================================*/
+static uid_t GetUserID( const char *username )
+{
+    uid_t uid = (uid_t)-1;
+    struct passwd *passwordEntry = NULL;
+
+    if ( username != NULL )
+    {
+        passwordEntry = getpwnam( username );
+        if ( passwordEntry != NULL )
+        {
+            uid = passwordEntry->pw_uid;
+        }
+    }
+
+    return uid;
 }
 
 /*============================================================================*/
@@ -1018,20 +1066,18 @@ static int CheckAuthentication( FCGIVarsState *pState )
                 result = SESSIONMGR_Validate( pSession, &uid );
                 if ( result == EOK )
                 {
-                    /* store the uid of the current user */
-                    pState->uid = uid;
-                    if ( seteuid( uid ) != 0 )
-                    {
-                        pState->errorCode |= ERROR_SET_UID;
-                        result = errno;
-                        syslog( LOG_ERR, "Failed to set uid to %d", uid );
-                    }
-
-                    /* update the varserver user */
-                    result = VARSERVER_UpdateUser( pState->hVarServer );
+                    result = SetUser( pState, uid );
                     if ( result != EOK )
                     {
-                        pState->errorCode |= ERROR_UPDATE_USER;
+                        result = EACCES;
+                    }
+                }
+                else if ( pState->unauthenticated_user != (uid_t)-1)
+                {
+                    result = SetUser( pState, pState->unauthenticated_user );
+                    if ( result != EOK )
+                    {
+                        result = EACCES;
                     }
                 }
                 else
@@ -1041,6 +1087,8 @@ static int CheckAuthentication( FCGIVarsState *pState )
                     syslog( LOG_INFO,
                             "Failed to validate session %8.8s",
                             pSession );
+
+                    result = EACCES;
                 }
             }
             else
@@ -1055,6 +1103,64 @@ static int CheckAuthentication( FCGIVarsState *pState )
         {
             /* no authentication necessary */
             result = EOK;
+        }
+    }
+
+    return result;
+}
+
+/*============================================================================*/
+/*  SetUser                                                                   */
+/*!
+    Set the user for the current transaction to the specified uid
+
+    The SetUser function sets the user identifier for the current
+    transaction to the specified uid.
+
+    @param[in]
+        pState
+            pointer to the FCGIVars state object
+
+    @param[in]
+        uid
+            user id for the current transaction
+
+    @retval EOK the user id was set correctly
+    @retval ENOTSUP invalid user id
+    @retval other error from VARSERVER_UpdateUser or seteuid
+
+==============================================================================*/
+static int SetUser( FCGIVarsState *pState, uid_t uid )
+{
+    int result = EINVAL;
+
+    if ( pState != NULL )
+    {
+        if ( uid != (uid_t)-1 )
+        {
+            /* store the uid of the current user */
+            pState->uid = uid;
+            if ( seteuid( uid ) != 0 )
+            {
+                pState->errorCode |= ERROR_SET_UID;
+                result = errno;
+                syslog( LOG_ERR, "Failed to set uid to %d", uid );
+            }
+            else
+            {
+                /* update the varserver user */
+                result = VARSERVER_UpdateUser( pState->hVarServer );
+                if ( result != EOK )
+                {
+                    pState->errorCode |= ERROR_UPDATE_USER;
+                }
+            }
+        }
+        else
+        {
+            syslog( LOG_ERR, "Invalid uid %d", uid );
+            pState->errorCode = ERROR_SET_UID;
+            result = ENOTSUP;
         }
     }
 
