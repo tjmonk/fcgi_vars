@@ -1072,14 +1072,6 @@ static int CheckAuthentication( FCGIVarsState *pState )
                         result = EACCES;
                     }
                 }
-                else if ( pState->unauthenticated_user != (uid_t)-1)
-                {
-                    result = SetUser( pState, pState->unauthenticated_user );
-                    if ( result != EOK )
-                    {
-                        result = EACCES;
-                    }
-                }
                 else
                 {
                     pState->errorCode |= ERROR_SESSION_VALIDATION;
@@ -1087,6 +1079,20 @@ static int CheckAuthentication( FCGIVarsState *pState )
                     syslog( LOG_INFO,
                             "Failed to validate session %8.8s",
                             pSession );
+
+                    result = EACCES;
+                }
+            }
+            else if ( pState->unauthenticated_user != (uid_t)-1)
+            {
+                result = SetUser( pState, pState->unauthenticated_user );
+                if ( result != EOK )
+                {
+                    syslog( LOG_INFO,
+                            "Failed to set unauthenticated user %d",
+                            pState->unauthenticated_user );
+
+                    pState->errorCode |= ERROR_SESSION_VALIDATION;
 
                     result = EACCES;
                 }
