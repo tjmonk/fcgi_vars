@@ -689,17 +689,24 @@ static int SendVarsResponse( FCGIVarsState *pState )
         /* get a pointer to the variable cache */
         pCache = pState->pVarCache;
 
-    	SendVarsHeader();
+        if( VARCACHE_Size( pCache ) > 0 )
+        {
+            SendVarsHeader();
 
-        /* initialize the output count */
-        pState->outputCount = 0;
+            /* initialize the output count */
+            pState->outputCount = 0;
 
-        /* map the OutputVar function across the variable cache */
-        VARCACHE_Map( pCache, OutputVar, (void *)pState );
+            /* map the OutputVar function across the variable cache */
+            VARCACHE_Map( pCache, OutputVar, (void *)pState );
 
-        SendVarsFooter(pState->outputCount);
+            SendVarsFooter(pState->outputCount);
 
-        result = EOK;
+            result = EOK;
+        }
+        else
+        {
+            result = ENOENT;
+        }
     }
 
     return result;
@@ -737,23 +744,24 @@ static int ProcessGETRequest( FCGIVarsState *pState )
         {
             result = SendVarsResponse( pState );
         }
-        else
-        {
-            switch( result )
-            {
-                case EPERM:
-                case EACCES:
-                    result = ErrorResponse( 401,
-                                            "Unauthorized",
-                                            pState->errorCode );
-                    break;
 
-                default:
-                    result = ErrorResponse( 400,
-                                            "Bad request",
-                                            pState->errorCode );
-                    break;
-            }
+        switch( result )
+        {
+            case EOK:
+                break;
+
+            case EPERM:
+            case EACCES:
+                result = ErrorResponse( 401,
+                                        "Unauthorized",
+                                        pState->errorCode );
+                break;
+
+            default:
+                result = ErrorResponse( 400,
+                                        "Bad request",
+                                        pState->errorCode );
+                break;
         }
     }
 
@@ -803,10 +811,35 @@ static int ProcessPOSTRequest( FCGIVarsState *pState )
                         result = SendVarsResponse( pState );
                     }
 
+                    switch( result )
+                    {
+                        case EOK:
+                            break;
+
+                        case EPERM:
+                        case EACCES:
+                            result = ErrorResponse( 401,
+                                                    "Unauthorized",
+                                                    pState->errorCode );
+                            break;
+
+                        default:
+                            result = ErrorResponse( 400,
+                                                    "Bad request",
+                                                    pState->errorCode );
+                            break;
+                    }
+
                     /* clear the POST buffer.  This is critical since
                      * the buffer must be zeroed before the next read in order
                      * to make sure it is correctly NUL terminated */
                     ClearPOSTBuffer( pState );
+                }
+                else
+                {
+                    result = ErrorResponse( 400,
+                                            "Bad request",
+                                            pState->errorCode );
                 }
             }
             else
