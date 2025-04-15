@@ -84,8 +84,8 @@ SOFTWARE.
 /*! Authentication failure */
 #define ERROR_AUTHENTICATION 0x10
 
-/*! cache query error */
-#define ERROR_CACHE_QUERY 0x20
+/*! pre query error */
+#define ERROR_PRE_QUERY 0x20
 
 /*! data query error */
 #define ERROR_DATA_QUERY 0x40
@@ -110,6 +110,16 @@ SOFTWARE.
 
 /*! unsupported request */
 #define ERROR_UNSUPPORTED_REQUEST 0x2000
+
+/*! output type enumeration */
+typedef enum _outputFormat
+{
+    /*! list type output format */
+    OUTPUT_FMT_LIST=0,
+
+    /*! object type output format */
+    OUTPUT_FMT_OBJECT=1
+} OutputFormat;
 
 /*! node for managing a list of variable caches */
 typedef struct _cacheNode
@@ -171,6 +181,12 @@ typedef struct _FCGIVarsState
 
     /*! error code to report to client */
     uint32_t errorCode;
+
+    /*! default output format */
+    OutputFormat defaultOutputFmt;
+
+    /*! output format */
+    OutputFormat outputFmt;
 
 } FCGIVarsState;
 
@@ -240,6 +256,7 @@ static int ProcessTagsQuery( FCGIVarsState *pState, char *query );
 static int ProcessInstanceQuery( FCGIVarsState *pState, char *query );
 static int ProcessSelectCache( FCGIVarsState *pState, char *name );
 static int ProcessSelectClearCache( FCGIVarsState *pState, char *name );
+static int ProcessOutputFormat( FCGIVarsState *pState, char *fmt );
 
 static VAR_HANDLE CheckFlags( FCGIVarsState *pState, VAR_HANDLE hVar );
 
@@ -254,9 +271,17 @@ static HandlerFunction GetHandlerFunction( char *method,
                                            FCGIHandler *pFCGIHandlers,
                                            size_t numHandlers );
 
-static int OutputJSONVar( char prefix, VarInfo *info, char *value );
-static void SendVarsHeader( void );
-static void SendVarsFooter( int count );
+static int OutputJSONVar( FCGIVarsState *pState,
+                          char prefix,
+                          VarInfo *info,
+                          char *value );
+static int OutputJSONVarName( FCGIVarsState *pState,
+                              char prefix,
+                              VarInfo *info );
+static int OutputJSONVarValue( FCGIVarsState *pState, char *value );
+
+static void SendVarsHeader( FCGIVarsState *pState );
+static void SendVarsFooter( FCGIVarsState *pState );
 static int ErrorResponse( int status,  char *description, uint32_t errorCode );
 static bool IsJSON( char *value );
 
@@ -331,8 +356,8 @@ int main(int argc, char **argv)
         {
             /* process FCGI requests */
             ProcessRequests( &state,
-                                methodHandlers,
-                                sizeof(methodHandlers) / sizeof(FCGIHandler) );
+                             methodHandlers,
+                             sizeof(methodHandlers) / sizeof(FCGIHandler) );
         }
         else
         {
@@ -387,6 +412,9 @@ static int InitState( FCGIVarsState *pState )
         /* set the unauthenticated user id */
         pState->unauthenticated_user = (uid_t)-1;
 
+        /* set the default ouput format */
+        pState->defaultOutputFmt = OUTPUT_FMT_LIST;
+
         result = EOK;
     }
 
@@ -417,6 +445,7 @@ static void usage( char *cmdname )
                 " [-h] : display this help"
                 " [-v] : verbose output"
                 " [-r] : readonly"
+                " [-o] : default output format"
                 " [-f <flag list>] : comma separated flag list"
                 " [-l <max POST length>] : maximum POST data length",
                 cmdname );
@@ -453,7 +482,7 @@ static int ProcessOptions( int argC, char *argV[], FCGIVarsState *pState )
 {
     int c;
     int result = EINVAL;
-    const char *options = "hvl:rf:au:";
+    const char *options = "hvl:rf:au:o:";
 
     if( ( pState != NULL ) &&
         ( argV != NULL ) )
@@ -490,6 +519,23 @@ static int ProcessOptions( int argC, char *argV[], FCGIVarsState *pState )
 
                 case 'u':
                     pState->unauthenticated_user = GetUserID(optarg);
+                    break;
+
+                case 'o':
+                    switch ( tolower(optarg[0]) )
+                    {
+                        case 'o':
+                            pState->defaultOutputFmt = OUTPUT_FMT_OBJECT;
+                            break;
+
+                        case 'l':
+                            pState->defaultOutputFmt = OUTPUT_FMT_LIST;
+                            break;
+
+                        default:
+                            result = ENOTSUP;
+                            break;
+                    }
                     break;
 
                 default:
@@ -581,6 +627,9 @@ static int ProcessRequests( FCGIVarsState *pState,
         {
             /* reset error code */
             pState->errorCode = 0;
+
+            /* reset output format */
+            pState->outputFmt = pState->defaultOutputFmt;
 
             /* check the request method */
             method = getenv("REQUEST_METHOD");
@@ -691,7 +740,7 @@ static int SendVarsResponse( FCGIVarsState *pState )
 
         if( VARCACHE_Size( pCache ) > 0 )
         {
-            SendVarsHeader();
+            SendVarsHeader(pState);
 
             /* initialize the output count */
             pState->outputCount = 0;
@@ -699,7 +748,7 @@ static int SendVarsResponse( FCGIVarsState *pState )
             /* map the OutputVar function across the variable cache */
             VARCACHE_Map( pCache, OutputVar, (void *)pState );
 
-            SendVarsFooter(pState->outputCount);
+            SendVarsFooter(pState);
 
             result = EOK;
         }
@@ -981,6 +1030,7 @@ static int ProcessQuery( FCGIVarsState *pState, char *query )
 
     QueryFunc fn1[] =
     {
+        { "fmt=", &ProcessOutputFormat },
         { "cache=", &ProcessSelectCache },
         { "clearcache=", &ProcessSelectClearCache }
     };
@@ -1031,7 +1081,7 @@ static int ProcessQuery( FCGIVarsState *pState, char *query )
             }
             else
             {
-                pState->errorCode |= ERROR_CACHE_QUERY;
+                pState->errorCode |= ERROR_PRE_QUERY;
             }
 
             /* restore the original process user id before it was changed */
@@ -1657,6 +1707,65 @@ static int ProcessSetTuple( FCGIVarsState *pState, char *pTuple )
 }
 
 /*============================================================================*/
+/*  ProcessOutputFormat                                                       */
+/*!
+    Select the output rendering format
+
+    The ProcessOutputFormat function selects the specific output format
+    type for the active query.
+
+    The options are "LIST" and "OBJECT".  Only the first character of the
+    format name is used to select the output format.
+
+    usage examples:
+
+        "fmt=object"
+        "fmt=list"
+        "fmt=l"
+        "fmt=o"
+
+    @param[in]
+        pState
+            pointer to the FCGIVars state object
+
+    @param[in]
+        fmt
+            name of the output format (only the first character is used)
+
+    @retval EOK query processed successfully
+    @retval ENOTSUP output format not supported
+    @retval EINVAL invalid arguments
+
+==============================================================================*/
+static int ProcessOutputFormat( FCGIVarsState *pState, char *fmt )
+{
+    int result = EINVAL;
+
+    if ( ( pState != NULL ) &&
+         ( fmt != NULL ) )
+    {
+        switch( toupper(fmt[0] ) )
+        {
+            case 'O':
+                pState->outputFmt = OUTPUT_FMT_OBJECT;
+                result = EOK;
+                break;
+
+            case 'L':
+                pState->outputFmt = OUTPUT_FMT_LIST;
+                result = EOK;
+                break;
+
+            default:
+                result = ENOTSUP;
+                break;
+        }
+    }
+
+    return result;
+}
+
+/*============================================================================*/
 /*  ProcessSelectCache                                                        */
 /*!
     Select a cache
@@ -2083,7 +2192,7 @@ static int OutputVar( VAR_HANDLE hVar, void *arg )
                     prefix = ( pState->outputCount > 0 ) ? ',' : ' ';
 
                     /* output the data */
-                    OutputJSONVar( prefix, &info, pData );
+                    OutputJSONVar( pState, prefix, &info, pData );
 
                     /* clear the memory */
                     pData[0] = '\0';
@@ -2176,19 +2285,37 @@ static void TerminationHandler( int signum, siginfo_t *info, void *ptr )
 
     The SendVarsHeader function sends a variable response header
 
+    @param[in]
+        pState
+            pointer to the FCGIVarsState object
+
     @retval EOK response sent successfully
     @retval EINVAL invalid arguments
 
 ==============================================================================*/
-static void SendVarsHeader( void )
+static void SendVarsHeader( FCGIVarsState *pState )
 {
-    /* output the response header */
-    printf("Status: 200 OK\r\n");
-    printf("Content-Type: application/json\r\n\r\n");
+    if ( pState != NULL )
+    {
+        /* output the response header */
+        printf("Status: 200 OK\r\n");
+        printf("Content-Type: application/json\r\n\r\n");
 
-    /* output the response body */
-    printf("{\"values\" : [");
+        /* output the response body */
+        switch ( pState->outputFmt )
+        {
+            case OUTPUT_FMT_LIST:
+                printf("{\"values\" : [");
+                break;
 
+            case OUTPUT_FMT_OBJECT:
+                printf("{");
+                break;
+
+            default:
+                break;
+        }
+    }
 }
 
 /*============================================================================*/
@@ -2201,9 +2328,17 @@ static void SendVarsHeader( void )
     function can be used to output a list of variables and prepend (or not)
     a comma.
 
-    The object will be similar to the following:
+    For a list, output will be similar to the following:
 
     { "name" : "some name", "value" : "some value" }
+
+    For an object, the output will be similar to the following:
+
+    "variable name" : "variable value"
+
+    @param[in]
+        pState
+            pointer to the FCGIVarsState object containing the output format
 
     @param[in]
         info
@@ -2217,58 +2352,176 @@ static void SendVarsHeader( void )
     @retval EINVAL invalid arguments
 
 ==============================================================================*/
-static int OutputJSONVar( char prefix, VarInfo *info, char *value )
+static int OutputJSONVar( FCGIVarsState *pState,
+                          char prefix,
+                          VarInfo *info,
+                          char *value )
 {
     int result = EINVAL;
 
-    if ( ( info != NULL ) &&
+    result = OutputJSONVarName( pState, prefix, info );
+    if ( result == EOK )
+    {
+        result = OutputJSONVarValue( pState, value );
+    }
+
+    return result;
+}
+
+/*============================================================================*/
+/*  OutputJSONVarName                                                         */
+/*!
+    Output a JSON variable name
+
+    The OutputJSONVarName function outputs a JSON variable name
+    depending on the requested output format.
+
+    For a list output, the output will be similar to the following:
+
+     { "name" : "some name", "instanceID" : "non zero instance ID"
+
+     For an object output, the output will be similar to the following:
+
+     "name_<non_zero_instance_id>"
+
+    @param[in]
+        pState
+            pointer to the FCGIVarsState containing the output format
+
+    @param[in]
+        prefix
+            pointer to the prefix character to prepend to the output
+
+    @param[in]
+        info
+            pointer to the variable information
+
+    @retval EOK the JSONVar variable name was output
+    @retval ENOTSUP unsupported output format
+    @retval EINVAL invalid arguments
+
+==============================================================================*/
+static int OutputJSONVarName( FCGIVarsState *pState,
+                              char prefix,
+                              VarInfo *info )
+{
+    int result = EINVAL;
+
+    if ( ( pState != NULL ) &&
+         ( info != NULL ) )
+    {
+        switch ( pState->outputFmt )
+        {
+            case OUTPUT_FMT_LIST:
+                if ( info->instanceID == 0 )
+                {
+                    printf( "%c{ \"name\": \"%s\", ",
+                            prefix,
+                            info->name );
+                }
+                else
+                {
+                    printf( "%c{ \"name\": \"%s\", "
+                            "\"instanceID\" : %d, ",
+                            prefix,
+                            info->name,
+                            info->instanceID );
+                }
+                result = EOK;
+                break;
+
+            case OUTPUT_FMT_OBJECT:
+                if ( info->instanceID == 0 )
+                {
+                    printf( "%c\"%s\"", prefix, info->name );
+                }
+                else
+                {
+                    printf( "%c\"%s_%d\"",
+                            prefix,
+                            info->name,
+                            info->instanceID );
+                }
+                result = EOK;
+                break;
+
+            default:
+                result = ENOTSUP;
+        }
+    }
+
+    return result;
+}
+
+/*============================================================================*/
+/*  OutputJSONVarValue                                                        */
+/*!
+    Output a JSON variable value
+
+    The OutputJSONVarValue function outputs a JSON variable value
+    depending on the requested output format.
+
+    For a list output, the output will be similar to the following:
+
+     "value" : "some value" }
+
+     For an object output, the output will be similar to the following:
+
+     : "some value"
+
+    @param[in]
+        pState
+            pointer to the FCGIVarsState object containing the output format
+
+    @param[in]
+        value
+            value of the variable as a string
+
+    @retval EOK the JSONVar value was output
+    @retval ENOTSUP unsupported output format
+    @retval EINVAL invalid arguments
+
+==============================================================================*/
+static int OutputJSONVarValue( FCGIVarsState *pState, char *value )
+{
+    int result = EINVAL;
+    bool is_json;
+
+    if ( ( pState != NULL ) &&
          ( value != NULL ) )
     {
-        if (IsJSON( value ) == true )
+        /* check if the output string is a JSON string */
+        is_json = IsJSON( value );
+        switch ( pState->outputFmt )
         {
-            if ( info->instanceID == 0 )
-            {
-                printf( "%c{ \"name\": \"%s\", "
-                        "\"value\" : %s }",
-                        prefix,
-                        info->name,
-                        value );
+            case OUTPUT_FMT_LIST:
+                if ( is_json == true )
+                {
+                    printf( "\"value\" : %s }", value );
+                }
+                else
+                {
+                    printf( "\"value\" : \"%s\" }", value );
+                }
+                result = EOK;
+                break;
 
-            }
-            else
-            {
-                printf( "%c{ \"name\": \"%s\", "
-                        "\"instanceID\" : %d, "
-                        "\"value\" : %s }",
-                        prefix,
-                        info->name,
-                        info->instanceID,
-                        value );
-            }
-        }
-        else
-        {
-            if ( info->instanceID == 0 )
-            {
-                printf( "%c{ \"name\": \"%s\", "
-                        "\"value\" : \"%s\" }",
-                        prefix,
-                        info->name,
-                        value );
-            }
-            else
-            {
-                printf( "%c{ \"name\": \"%s\", "
-                        "\"instanceID\" : %d, "
-                        "\"value\" : \"%s\" }",
-                        prefix,
-                        info->name,
-                        info->instanceID,
-                        value );
-            }
-        }
+            case OUTPUT_FMT_OBJECT:
+                if ( is_json == true )
+                {
+                    printf( ":%s", value );
+                }
+                else
+                {
+                    printf( ":\"%s\"", value );
+                }
+                result = EOK;
+                break;
 
-        result = EOK;
+            default:
+                result = ENOTSUP;
+                break;
+        }
     }
 
     return result;
@@ -2282,13 +2535,29 @@ static int OutputJSONVar( char prefix, VarInfo *info, char *value )
     The SendVarsFooter function sends a variable response footer
 
     @param[in]
-        count
-            count of the number of variables in the payload
+        pState
+            pointer to the FCGIVarsState object
 
 ==============================================================================*/
-static void SendVarsFooter( int count )
+static void SendVarsFooter( FCGIVarsState *pState )
 {
-    printf("],\"count\": %d }\n", count );
+    if ( pState != NULL )
+    {
+        switch( pState->outputFmt )
+        {
+            case OUTPUT_FMT_LIST:
+                printf("],\"count\": %d }\n", pState->outputCount );
+                break;
+
+            case OUTPUT_FMT_OBJECT:
+                printf("}\n");
+                break;
+
+            default:
+                break;
+
+        }
+    }
 }
 
 /*============================================================================*/
